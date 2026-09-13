@@ -296,8 +296,9 @@ async fn main(_spawner: Spawner) {
     let mut display = Display::new(segments, grids);
 
     // Buttons (active LOW).
-    let mut mode = DebouncedButton::new(Input::new(p.PA1, Pull::Up));
-    let mut adj = DebouncedButton::new(Input::new(p.PA2, Pull::Up));
+    let mut btn_mode = DebouncedButton::new(Input::new(p.PA1, Pull::Up));
+    let mut btn_minus = DebouncedButton::new(Input::new(p.PA2, Pull::Up));
+    let mut btn_plus = DebouncedButton::new(Input::new(p.PA0, Pull::Up));
 
     let mut clock = Clock::new(START_HOUR, START_MIN, START_SEC);
     let mut field = EditField::None;
@@ -312,17 +313,28 @@ async fn main(_spawner: Spawner) {
         display.step();
 
         // --- edit mode -----------------------------------------------------
-        if mode.just_pressed() {
+        if btn_mode.just_pressed() {
             field = field.next();
             info!("edit: {}", edit_name(field));
         }
 
-        if field != EditField::None && adj.pressed() {
+        if field != EditField::None && btn_plus.pressed() {
             if now >= next_adj {
                 match field {
                     EditField::Hours => clock.hour = (clock.hour + 1) % 24,
                     EditField::Minutes => clock.min = (clock.min + 1) % 60,
                     EditField::Seconds => clock.sec = (clock.sec + 1) % 60,
+                    EditField::None => {}
+                }
+                info!("time: {:02}:{:02}:{:02}", clock.hour, clock.min, clock.sec);
+                next_adj = now + REPEAT_STEP;
+            }
+        } else if field != EditField::None && btn_minus.pressed() {
+            if now >= next_adj {
+                match field {
+                    EditField::Hours => clock.hour = (clock.hour + 23) % 24,
+                    EditField::Minutes => clock.min = (clock.min + 59) % 60,
+                    EditField::Seconds => clock.sec = (clock.sec + 59) % 60,
                     EditField::None => {}
                 }
                 info!("time: {:02}:{:02}:{:02}", clock.hour, clock.min, clock.sec);
