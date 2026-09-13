@@ -299,9 +299,6 @@ async fn main(_spawner: Spawner) {
     let mut mode = DebouncedButton::new(Input::new(p.PA1, Pull::Up));
     let mut adj = DebouncedButton::new(Input::new(p.PA2, Pull::Up));
 
-    // Status LED (Blue Pill, active LOW).
-    let mut led = Output::new(p.PC13, Level::High, Speed::Low);
-
     let mut clock = Clock::new(START_HOUR, START_MIN, START_SEC);
     let mut field = EditField::None;
 
@@ -320,15 +317,17 @@ async fn main(_spawner: Spawner) {
             info!("edit: {}", edit_name(field));
         }
 
-        if field != EditField::None && adj.pressed() && now >= next_adj {
-            match field {
-                EditField::Hours => clock.hour = (clock.hour + 1) % 24,
-                EditField::Minutes => clock.min = (clock.min + 1) % 60,
-                EditField::Seconds => clock.sec = (clock.sec + 1) % 60,
-                EditField::None => {}
+        if field != EditField::None && adj.pressed() {
+            if now >= next_adj {
+                match field {
+                    EditField::Hours => clock.hour = (clock.hour + 1) % 24,
+                    EditField::Minutes => clock.min = (clock.min + 1) % 60,
+                    EditField::Seconds => clock.sec = (clock.sec + 1) % 60,
+                    EditField::None => {}
+                }
+                info!("time: {:02}:{:02}:{:02}", clock.hour, clock.min, clock.sec);
+                next_adj = now + REPEAT_STEP;
             }
-            info!("time: {:02}:{:02}:{:02}", clock.hour, clock.min, clock.sec);
-            next_adj = now + REPEAT_STEP;
         } else {
             // Reload the longer initial delay each time the button is released.
             next_adj = now + REPEAT_INITIAL;
@@ -349,10 +348,6 @@ async fn main(_spawner: Spawner) {
             d[b] = BLANK;
         }
         display.set_digits(d);
-
-        // --- status LED: slow 1 Hz heartbeat --------------------------------
-        let heartbeat = (now.as_millis() / 1000).is_multiple_of(2);
-        led.set_level(if heartbeat { Level::Low } else { Level::High });
 
         Timer::after_millis(SLICE_MS).await;
     }
