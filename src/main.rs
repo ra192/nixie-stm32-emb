@@ -31,6 +31,9 @@
 //!   Status:
 //!     PC13 -> on-board Blue Pill LED (negative logic: LOW = lit)
 //!
+//!   Real-time clock (DS3231 at I2C address 0x68, read once per minute):
+//!     PB6 -> SCL      PB7 -> SDA
+//!
 //! Clock source for the core: 8 MHz HSI /2 x16 = 64 MHz.
 
 #![no_std]
@@ -39,6 +42,8 @@
 use defmt::info;
 use defmt_rtt as _;
 use embassy_executor::Spawner;
+use embassy_stm32::i2c::{I2c, Master};
+use embassy_stm32::mode::Blocking;
 use embassy_stm32::Config;
 use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::rcc::{AHBPrescaler, APBPrescaler, Pll, PllMul, PllPreDiv, PllSource, Sysclk};
@@ -153,6 +158,63 @@ impl Clock {
             self.sec / 10,
             self.sec % 10,
         ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DS3231 real-time clock (I2C)
+// ---------------------------------------------------------------------------
+/// DS3231 7-bit I2C address (A0/A1/AD0 tied low).
+const RTC_ADDR: u8 = 0x68;
+
+/// Decode a binary-coded-decimal byte (0x00-0x99) into a plain value.
+fn bcd(b: u8) -> u8 {
+    (b & 0x0F) + 10 * (b >> 4)
+}
+
+struct Ds3231 {
+    i2c: I2c<'static, Blocking, Master>,
+}
+
+impl Ds3231 {
+    fn new(i2c: I2c<'static, Blocking, Master>) -> Self {
+        Self { i2c }
+    }
+
+    /// Read HH:MM:SS from the RTC and copy it into [Clock] if it looks sane.
+    fn sync(&mut self, clock: &mut Clock) {
+        // Point the address register at seconds (0x00) and read 3 registers.
+        let mut buf = [0u8; 3];
+        match self.i2c.blocking_write_read(RTC_ADDR, &[0x00], &mut buf) {
+            Err(e) => info!("rtc: read error {:?}", e),
+            Ok(()) => {
+                let sec = bcd(buf[0] & 0x7F); // bit7 = clock-halt flag
+                let min = bcd(buf[1]);
+                let hour = bcd(buf[2] & 0x3F); // bit6 = 0 in 24-hour mode
+                if hour < 24 && min < 60 && sec < 60 {
+                    clock.hour = hour;
+                    clock.min = min;
+                    clock.sec = sec;
+                    info!("rtc: {:02}:{:02}:{:02}", hour, min, sec);
+                } else {
+                    info!("rtc: invalid time {:02}:{:02}:{:02}", hour, min, sec);
+                }
+            }
+        }
+    }
+
+    /// Write HH:MM:SS to the RTC in BCD (24-hour mode, clock halt cleared).
+    fn save(&mut self, clock: &Clock) {
+        let buf = [
+            0x00,                                        // register pointer (seconds)
+            ((clock.sec / 10) << 4) | (clock.sec % 10), // bit7 (CH) = 0: run
+            ((clock.min / 10) << 4) | (clock.min % 10),
+            ((clock.hour / 10) << 4) | (clock.hour % 10), // bit6 = 0: 24h mode
+        ];
+        match self.i2c.blocking_write(RTC_ADDR, &buf) {
+            Ok(()) => info!("rtc: stored {:02}:{:02}:{:02}", clock.hour, clock.min, clock.sec),
+            Err(e) => info!("rtc: write error {:?}", e),
+        }
     }
 }
 
@@ -300,11 +362,21 @@ async fn main(_spawner: Spawner) {
     let mut btn_minus = DebouncedButton::new(Input::new(p.PA2, Pull::Up));
     let mut btn_plus = DebouncedButton::new(Input::new(p.PA0, Pull::Up));
 
+    // DS3231 on I2C1 (SCL=PB6, SDA=PB7). 100 kHz default.
+    let mut rtc = Ds3231::new(I2c::new_blocking(
+        p.I2C1,
+        p.PB6,
+        p.PB7,
+        embassy_stm32::i2c::Config::default(),
+    ));
+
     let mut clock = Clock::new(START_HOUR, START_MIN, START_SEC);
+    rtc.sync(&mut clock); // take the boot time from the RTC
     let mut field = EditField::None;
 
     let mut next_sec = Instant::now() + Duration::from_secs(1);
     let mut next_adj = Instant::now() + REPEAT_INITIAL;
+    let mut next_rtc = Instant::now() + Duration::from_secs(60);
 
     loop {
         let now = Instant::now();
@@ -314,6 +386,9 @@ async fn main(_spawner: Spawner) {
 
         // --- edit mode -----------------------------------------------------
         if btn_mode.just_pressed() {
+            if field == EditField::Seconds {
+                rtc.save(&clock);
+            }
             field = field.next();
             info!("edit: {}", edit_name(field));
         }
@@ -349,6 +424,12 @@ async fn main(_spawner: Spawner) {
         while field == EditField::None && now >= next_sec {
             clock.tick();
             next_sec += Duration::from_secs(1);
+        }
+
+        // --- re-sync from the RTC once per minute (skip while editing) -----
+        if field == EditField::None && now >= next_rtc {
+            rtc.sync(&mut clock);
+            next_rtc += Duration::from_secs(60);
         }
 
         // --- display content ------------------------------------------------
